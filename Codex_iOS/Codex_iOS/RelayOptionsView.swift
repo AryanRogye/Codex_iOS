@@ -11,7 +11,6 @@ struct RelayOptionsView: View {
         case relayURL
         case relayToken
         case model
-        case workingDirectory
     }
 
     var body: some View {
@@ -46,23 +45,57 @@ struct RelayOptionsView: View {
             }
 
             Section("Actions") {
-                Button("Save") {
+                relayActionButton(
+                    title: "Save Settings",
+                    subtitle: "Persist relay URL, token, and model",
+                    systemImage: "square.and.arrow.down",
+                    tint: .blue,
+                    isLoading: false
+                ) {
                     dismissKeyboard()
                     viewModel.saveSettings()
                 }
 
-                Button("Test") {
+                relayActionButton(
+                    title: "Test Connection",
+                    subtitle: "Check if relay is reachable",
+                    systemImage: "bolt.horizontal.circle.fill",
+                    tint: .orange,
+                    isLoading: viewModel.isTestingConnection
+                ) {
                     dismissKeyboard()
                     Task { await viewModel.testConnection() }
                 }
+                .disabled(viewModel.isTestingConnection || viewModel.isSyncingSessions)
 
-                Button("Sync Sessions") {
+                relayActionButton(
+                    title: "Sync Sessions",
+                    subtitle: "Refresh sessions from relay",
+                    systemImage: "arrow.clockwise.circle.fill",
+                    tint: .green,
+                    isLoading: viewModel.isSyncingSessions
+                ) {
                     dismissKeyboard()
                     Task { await viewModel.refreshThreads() }
                 }
+                .disabled(viewModel.isTestingConnection || viewModel.isSyncingSessions)
             }
 
             Section("Status") {
+                if viewModel.isTestingConnection || viewModel.isSyncingSessions {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text(
+                            viewModel.isTestingConnection
+                                ? "Testing relay connection..."
+                                : "Syncing relay sessions..."
+                        )
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+
                 Text(viewModel.statusText)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -96,6 +129,53 @@ struct RelayOptionsView: View {
 
     private func dismissKeyboard() {
         focusedField = nil
+    }
+
+    private func relayActionButton(
+        title: String,
+        subtitle: String,
+        systemImage: String,
+        tint: Color,
+        isLoading: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                if isLoading {
+                    ProgressView()
+                        .tint(tint)
+                        .frame(width: 24, height: 24)
+                } else {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 19, weight: .semibold))
+                        .foregroundStyle(tint)
+                        .frame(width: 24, height: 24)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 8)
+            }
+            .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+            .padding(.horizontal, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color(uiColor: .secondarySystemBackground))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color(uiColor: .separator).opacity(0.22), lineWidth: 0.8)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 

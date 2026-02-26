@@ -5,6 +5,7 @@ protocol RelayClientProtocol {
     func listThreads(baseURL: URL, token: String?) async throws -> [RelayThreadSummary]
     func getThread(baseURL: URL, token: String?, threadID: String) async throws -> RelayThreadResponse
     func chat(baseURL: URL, token: String?, payload: RelayChatRequest) async throws -> RelayChatResponse
+    func listDirectories(baseURL: URL, token: String?, path: String?) async throws -> RelayDirectoryListing
 }
 
 struct RelayClient {
@@ -33,6 +34,16 @@ struct RelayClient {
     func chat(baseURL: URL, token: String?, payload: RelayChatRequest) async throws -> RelayChatResponse {
         var request = try makeRequest(baseURL: baseURL, path: "/v1/chat", method: "POST", token: token)
         request.httpBody = try JSONEncoder().encode(payload)
+        return try await send(request)
+    }
+
+    func listDirectories(baseURL: URL, token: String?, path: String?) async throws -> RelayDirectoryListing {
+        var pathWithQuery = "/v1/fs/list"
+        if let path, path.isEmpty == false {
+            let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? path
+            pathWithQuery += "?path=\(encoded)"
+        }
+        let request = try makeRequest(baseURL: baseURL, path: pathWithQuery, method: "GET", token: token)
         return try await send(request)
     }
 

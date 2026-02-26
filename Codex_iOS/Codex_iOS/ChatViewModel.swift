@@ -14,6 +14,8 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var activeThreadID: String?
     @Published private(set) var isSending: Bool = false
     @Published private(set) var isLoading: Bool = false
+    @Published private(set) var isTestingConnection: Bool = false
+    @Published private(set) var isSyncingSessions: Bool = false
     @Published var statusText: String = "Configure relay, then test connection"
     @Published var errorText: String?
     @Published private(set) var currentWorkingDirectory: String = ""
@@ -22,6 +24,8 @@ final class ChatViewModel: ObservableObject {
     private let client: RelayClientProtocol
     private let defaults: UserDefaults
     private var threadWorkingDirectories: [String: String]
+    private var threadLoadGeneration: Int = 0
+    private var loadedThreadUpdatedAt: [String: Date] = [:]
 
     private enum Keys {
         static let relayURL = "relay.url"
@@ -67,6 +71,12 @@ final class ChatViewModel: ObservableObject {
     }
 
     func testConnection() async {
+        guard isTestingConnection == false else { return }
+        isTestingConnection = true
+        statusText = "Testing connection..."
+        errorText = nil
+        defer { isTestingConnection = false }
+
         do {
             let config = try makeConfig()
             let health = try await client.health(baseURL: config.baseURL, token: config.token)
@@ -78,7 +88,18 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    func listDirectories(path: String?) async throws -> RelayDirectoryListing {
+        let config = try makeConfig()
+        return try await client.listDirectories(baseURL: config.baseURL, token: config.token, path: path)
+    }
+
     func refreshThreads() async {
+        guard isSyncingSessions == false else { return }
+        isSyncingSessions = true
+        statusText = "Syncing sessions..."
+        errorText = nil
+        defer { isSyncingSessions = false }
+
         do {
             let config = try makeConfig()
             let rows = try await client.listThreads(baseURL: config.baseURL, token: config.token)
@@ -94,6 +115,13 @@ final class ChatViewModel: ObservableObject {
 
             let count = sortedRows.count
             statusText = "Synced \(count) session\(count == 1 ? "" : "s")"
+
+            if let activeThreadID,
+               let activeSummary = sortedRows.first(where: { $0.id == activeThreadID }),
+               let loadedAt = loadedThreadUpdatedAt[activeThreadID],
+               activeSummary.updatedAt > loadedAt {
+                await loadThread(id: activeThreadID)
+            }
         } catch {
             errorText = error.localizedDescription
             statusText = "Unable to sync sessions"
@@ -101,6 +129,8 @@ final class ChatViewModel: ObservableObject {
     }
 
     func loadThread(id: String) async {
+        threadLoadGeneration += 1
+        let generation = threadLoadGeneration
         isLoading = true
         defer { isLoading = false }
         activeThreadID = id
@@ -109,19 +139,23 @@ final class ChatViewModel: ObservableObject {
         do {
             let config = try makeConfig()
             let thread = try await client.getThread(baseURL: config.baseURL, token: config.token, threadID: id)
+            guard generation == threadLoadGeneration else { return }
             messages = thread.messages
             activeThreadID = thread.id
             defaults.set(thread.id, forKey: Keys.activeThreadID)
+            loadedThreadUpdatedAt[thread.id] = thread.updatedAt
             currentWorkingDirectory = threadWorkingDirectories[thread.id] ?? ""
             errorText = nil
             statusText = "Loaded session \(shortID(thread.id))"
         } catch {
+            guard generation == threadLoadGeneration else { return }
             errorText = error.localizedDescription
             statusText = "Unable to load session"
         }
     }
 
     func startNewSession() {
+        threadLoadGeneration += 1
         activeThreadID = nil
         messages = []
         defaults.removeObject(forKey: Keys.activeThreadID)
@@ -135,6 +169,13 @@ final class ChatViewModel: ObservableObject {
         guard text.isEmpty == false else { return }
         guard isSending == false else { return }
         guard isLoading == false else { return }
+
+        let previousMessages = messages
+        let previousThreadID = activeThreadID
+        let previousInput = inputText
+
+        inputText = ""
+        messages.append(RelayMessage(role: .user, content: text, timestamp: Date()))
 
         isSending = true
         defer { isSending = false }
@@ -151,7 +192,7 @@ final class ChatViewModel: ObservableObject {
             )
 
             let reply = try await client.chat(baseURL: config.baseURL, token: config.token, payload: payload)
-            inputText = ""
+            messages.append(RelayMessage(role: .assistant, content: reply.reply, timestamp: Date()))
             activeThreadID = reply.threadId
             defaults.set(reply.threadId, forKey: Keys.activeThreadID)
             if cleanWorkingDirectory.isEmpty == false {
@@ -165,9 +206,19 @@ final class ChatViewModel: ObservableObject {
             statusText = "Reply received"
             errorText = nil
 
-            await loadThread(id: reply.threadId)
             await refreshThreads()
+            Task { [weak self] in
+                await self?.loadThread(id: reply.threadId)
+            }
         } catch {
+            inputText = previousInput
+            messages = previousMessages
+            activeThreadID = previousThreadID
+            if let previousThreadID {
+                defaults.set(previousThreadID, forKey: Keys.activeThreadID)
+            } else {
+                defaults.removeObject(forKey: Keys.activeThreadID)
+            }
             errorText = error.localizedDescription
             statusText = "Message failed"
         }

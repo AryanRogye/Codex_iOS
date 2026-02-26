@@ -10,7 +10,7 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -149,6 +149,25 @@ struct ChatResponse {
     thread_id: String,
     model: String,
     reply: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FsListQuery {
+    path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct FsListResponse {
+    path: String,
+    parent_path: Option<String>,
+    entries: Vec<FsEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct FsEntry {
+    name: String,
+    path: String,
+    is_directory: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -338,6 +357,7 @@ async fn run_server(args: ServeArgs) -> Result<(), String> {
 
     let app = Router::new()
         .route("/health", get(health))
+        .route("/v1/fs/list", get(list_filesystem))
         .route("/v1/threads", get(list_threads))
         .route("/v1/threads/{thread_id}", get(get_thread))
         .route("/v1/chat", post(chat))
@@ -496,6 +516,28 @@ async fn list_threads(
 
     rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     Ok(Json(rows))
+}
+
+async fn list_filesystem(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<FsListQuery>,
+) -> Result<Json<FsListResponse>, ApiError> {
+    authorize(&headers, state.auth_token.as_deref())?;
+
+    let base_dir = std::env::current_dir()
+        .map_err(|err| ApiError::Internal(format!("failed to read current directory: {err}")))?;
+    let resolved = resolve_working_directory_with_base(query.path.as_deref(), &base_dir)?
+        .unwrap_or_else(|| base_dir.clone());
+
+    let entries = list_directory_entries(&resolved)?;
+    let parent_path = resolved.parent().map(|parent| parent.display().to_string());
+
+    Ok(Json(FsListResponse {
+        path: resolved.display().to_string(),
+        parent_path: parent_path.filter(|value| !value.is_empty()),
+        entries,
+    }))
 }
 
 async fn get_thread(
@@ -925,6 +967,49 @@ fn expand_working_directory(raw: &str) -> Result<PathBuf, ApiError> {
     }
 
     Ok(PathBuf::from(raw))
+}
+
+fn list_directory_entries(path: &Path) -> Result<Vec<FsEntry>, ApiError> {
+    let entries = std::fs::read_dir(path).map_err(|err| {
+        ApiError::BadRequest(format!("cannot list directory '{}': {err}", path.display()))
+    })?;
+
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|err| {
+            ApiError::BadRequest(format!(
+                "failed reading a directory entry in '{}': {err}",
+                path.display()
+            ))
+        })?;
+        let entry_path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.is_dir() == false {
+            continue;
+        }
+
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.is_empty() {
+            continue;
+        }
+
+        out.push(FsEntry {
+            name,
+            path: entry_path.display().to_string(),
+            is_directory: true,
+        });
+    }
+
+    out.sort_by(|a, b| {
+        a.name
+            .to_ascii_lowercase()
+            .cmp(&b.name.to_ascii_lowercase())
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    Ok(out)
 }
 
 async fn ensure_codex_ready(codex_bin: &str) -> Result<(), String> {
@@ -1491,6 +1576,24 @@ not-json
             }
             _ => panic!("unexpected error variant"),
         }
+
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn list_directory_entries_returns_only_directories_sorted() {
+        let temp_root =
+            std::env::temp_dir().join(format!("codex-ios-relay-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(temp_root.join("z-folder")).expect("directory should be created");
+        fs::create_dir_all(temp_root.join("A-folder")).expect("directory should be created");
+        fs::write(temp_root.join("file.txt"), "hello").expect("file should be created");
+
+        let entries = list_directory_entries(&temp_root).expect("listing should succeed");
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "A-folder");
+        assert_eq!(entries[1].name, "z-folder");
+        assert!(entries.iter().all(|entry| entry.is_directory));
 
         let _ = fs::remove_dir_all(temp_root);
     }

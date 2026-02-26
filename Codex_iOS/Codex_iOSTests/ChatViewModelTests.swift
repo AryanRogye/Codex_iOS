@@ -5,7 +5,7 @@ import XCTest
 final class ChatViewModelTests: XCTestCase {
     func testLoadThreadSetsActiveThreadBeforeFetchCompletes() async {
         let mock = RelayClientMock()
-        mock.getThreadDelayNanos = 150_000_000
+        mock.getThreadDelayNanosByThreadID["old-thread"] = 150_000_000
 
         let suiteName = "ChatViewModelTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -26,7 +26,7 @@ final class ChatViewModelTests: XCTestCase {
 
     func testSendMessageDuringLoadIsBlockedAndThenContinuesSameThread() async {
         let mock = RelayClientMock()
-        mock.getThreadDelayNanos = 150_000_000
+        mock.getThreadDelayNanosByThreadID["old-thread"] = 150_000_000
 
         let suiteName = "ChatViewModelTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -63,7 +63,7 @@ final class ChatViewModelTests: XCTestCase {
 
         let viewModel = ChatViewModel(client: mock, defaults: defaults)
         viewModel.relayURLText = "https://example.com"
-        viewModel.workingDirectory = "  ~/Code/Projects/Codex_iOS  "
+        viewModel.updateNewSessionWorkingDirectory("  ~/Code/Projects/Codex_iOS  ")
         viewModel.inputText = "check status"
 
         await viewModel.sendMessage()
@@ -85,7 +85,7 @@ final class ChatViewModelTests: XCTestCase {
 
         let viewModel = ChatViewModel(client: mock, defaults: defaults)
         viewModel.relayURLText = "https://example.com"
-        viewModel.workingDirectory = "   "
+        viewModel.updateNewSessionWorkingDirectory("   ")
         viewModel.inputText = "hello"
 
         await viewModel.sendMessage()
@@ -93,11 +93,79 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(mock.chatPayloads.count, 1)
         XCTAssertNil(mock.chatPayloads.first?.workingDirectory)
     }
+
+    func testListDirectoriesReturnsRelayListing() async throws {
+        let mock = RelayClientMock()
+
+        let suiteName = "ChatViewModelTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let viewModel = ChatViewModel(client: mock, defaults: defaults)
+        viewModel.relayURLText = "https://example.com"
+
+        let listing = try await viewModel.listDirectories(path: "/Users/example")
+        XCTAssertEqual(listing.path, "/Users/example")
+        XCTAssertEqual(listing.entries.first?.name, "Code")
+    }
+
+    func testSendMessageAppendsUserImmediatelyBeforeReplyReturns() async {
+        let mock = RelayClientMock()
+        mock.chatDelayNanos = 150_000_000
+        mock.getThreadDelayNanosByThreadID["new-thread"] = 300_000_000
+
+        let suiteName = "ChatViewModelTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let viewModel = ChatViewModel(client: mock, defaults: defaults)
+        viewModel.relayURLText = "https://example.com"
+        viewModel.inputText = "hello"
+
+        let sendTask = Task { await viewModel.sendMessage() }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+
+        XCTAssertEqual(viewModel.inputText, "")
+        XCTAssertEqual(viewModel.messages.count, 1)
+        XCTAssertEqual(viewModel.messages.first?.role, .user)
+        XCTAssertEqual(viewModel.messages.first?.content, "hello")
+
+        await sendTask.value
+
+        XCTAssertGreaterThanOrEqual(viewModel.messages.count, 2)
+    }
+
+    func testLatestThreadSelectionWinsWhenResponsesReturnOutOfOrder() async {
+        let mock = RelayClientMock()
+        mock.getThreadDelayNanosByThreadID["old-thread"] = 180_000_000
+        mock.getThreadDelayNanosByThreadID["new-thread"] = 20_000_000
+
+        let suiteName = "ChatViewModelTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let viewModel = ChatViewModel(client: mock, defaults: defaults)
+        viewModel.relayURLText = "https://example.com"
+
+        let firstTask = Task { await viewModel.loadThread(id: "old-thread") }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+        let secondTask = Task { await viewModel.loadThread(id: "new-thread") }
+
+        await firstTask.value
+        await secondTask.value
+
+        XCTAssertEqual(viewModel.activeThreadID, "new-thread")
+        XCTAssertEqual(viewModel.messages.first?.content, "new-thread-user")
+    }
 }
 
 @MainActor
 private final class RelayClientMock: RelayClientProtocol {
-    var getThreadDelayNanos: UInt64 = 0
+    var getThreadDelayNanosByThreadID: [String: UInt64] = [:]
+    var chatDelayNanos: UInt64 = 0
     var chatPayloads: [RelayChatRequest] = []
 
     private let messageDate = Date(timeIntervalSince1970: 1_731_513_600)
@@ -119,8 +187,8 @@ private final class RelayClientMock: RelayClientProtocol {
     }
 
     func getThread(baseURL: URL, token: String?, threadID: String) async throws -> RelayThreadResponse {
-        if getThreadDelayNanos > 0 {
-            try? await Task.sleep(nanoseconds: getThreadDelayNanos)
+        if let delay = getThreadDelayNanosByThreadID[threadID], delay > 0 {
+            try? await Task.sleep(nanoseconds: delay)
         }
 
         return RelayThreadResponse(
@@ -128,19 +196,32 @@ private final class RelayClientMock: RelayClientProtocol {
             createdAt: messageDate,
             updatedAt: messageDate,
             messages: [
-                RelayMessage(role: .user, content: "previous", timestamp: messageDate),
-                RelayMessage(role: .assistant, content: "reply", timestamp: messageDate)
+                RelayMessage(role: .user, content: "\(threadID)-user", timestamp: messageDate),
+                RelayMessage(role: .assistant, content: "\(threadID)-assistant", timestamp: messageDate)
             ]
         )
     }
 
     func chat(baseURL: URL, token: String?, payload: RelayChatRequest) async throws -> RelayChatResponse {
+        if chatDelayNanos > 0 {
+            try? await Task.sleep(nanoseconds: chatDelayNanos)
+        }
         chatPayloads.append(payload)
 
         return RelayChatResponse(
             threadId: payload.threadId ?? "new-thread",
             model: "codex-default",
             reply: "ok"
+        )
+    }
+
+    func listDirectories(baseURL: URL, token: String?, path: String?) async throws -> RelayDirectoryListing {
+        RelayDirectoryListing(
+            path: path ?? "/Users/example",
+            parentPath: "/Users",
+            entries: [
+                RelayDirectoryEntry(name: "Code", path: "/Users/example/Code", isDirectory: true),
+            ]
         )
     }
 }

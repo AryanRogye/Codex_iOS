@@ -11,6 +11,10 @@ struct ContentView: View {
     @State private var selectedThreadID: String?
     @State private var sessionSearchText = ""
     @State private var visibleSessionLimit = Self.sessionPageSize
+    @State private var isDirectoryPickerPresented = false
+    @State private var pickerListing: RelayDirectoryListing?
+    @State private var pickerError: String?
+    @State private var pickerIsLoading = false
 
     private enum FocusField: Hashable {
         case message
@@ -56,6 +60,9 @@ struct ContentView: View {
                     }
                 }
             }
+        }
+        .sheet(isPresented: $isDirectoryPickerPresented) {
+            directoryPickerSheet
         }
         .task {
             await viewModel.bootstrap()
@@ -140,11 +147,13 @@ struct ContentView: View {
 
     private var compactLayout: some View {
         GeometryReader { proxy in
+            let drawerWidth = min(320, max(260, proxy.size.width * 0.74))
+
             ZStack(alignment: .leading) {
                 detailPane
 
                 if isSidebarPresented {
-                    Color.black.opacity(0.24)
+                    Color.black.opacity(0.14)
                         .ignoresSafeArea()
                         .onTapGesture {
                             withAnimation {
@@ -153,9 +162,14 @@ struct ContentView: View {
                         }
 
                     sidebarPanel
-                        .frame(width: min(340, proxy.size.width * 0.88))
+                        .frame(width: drawerWidth)
                         .transition(.move(edge: .leading))
-                        .shadow(radius: 10)
+                        .overlay(
+                            Rectangle()
+                                .fill(Color(uiColor: .separator).opacity(0.35))
+                                .frame(width: 0.5),
+                            alignment: .trailing
+                        )
                         .zIndex(1)
                 }
             }
@@ -164,7 +178,7 @@ struct ContentView: View {
 
     private var sidebarPanel: some View {
         sessionsSidebar
-            .background(Color(uiColor: .systemBackground))
+            .background(sidebarBackground)
     }
 
     private var detailPane: some View {
@@ -197,15 +211,13 @@ struct ContentView: View {
             HStack {
                 Text("Sessions")
                     .font(.headline)
-
                 Spacer()
-
                 Text("\(filteredThreads.count)")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 8)
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
 
             TextField("Search ID or last message", text: $sessionSearchText)
                 .textFieldStyle(.roundedBorder)
@@ -267,7 +279,9 @@ struct ContentView: View {
                     }
                 }
             }
-            .listStyle(.plain)
+            .listStyle(.insetGrouped)
+            .scrollContentBackground(.hidden)
+            .background(Color.clear)
         }
     }
 
@@ -330,8 +344,13 @@ struct ContentView: View {
                             dateSeparator(for: message.timestamp)
                         }
 
-                        messageRow(message)
+                        messageRow(message, isPending: isPendingMessage(at: index, message: message))
                             .id(messageID(for: index))
+                    }
+
+                    if viewModel.isSending {
+                        waitingForResponseRow
+                            .id("assistant-waiting")
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -371,17 +390,17 @@ struct ContentView: View {
         Color(uiColor: .systemBackground)
     }
 
-    private func messageRow(_ message: RelayMessage) -> some View {
+    private func messageRow(_ message: RelayMessage, isPending: Bool) -> some View {
         let isAssistant = message.role == .assistant
 
         return HStack(alignment: .bottom, spacing: 10) {
             if isAssistant {
                 speakerBadge(systemName: "sparkles", tint: .orange)
-                messageBubble(message, isAssistant: true)
+                messageBubble(message, isAssistant: true, isPending: false)
                 Spacer(minLength: 50)
             } else {
                 Spacer(minLength: 50)
-                messageBubble(message, isAssistant: false)
+                messageBubble(message, isAssistant: false, isPending: isPending)
                 speakerBadge(systemName: "person.fill", tint: .blue)
             }
         }
@@ -396,7 +415,36 @@ struct ContentView: View {
             .background(tint.gradient, in: Circle())
     }
 
-    private func messageBubble(_ message: RelayMessage, isAssistant: Bool) -> some View {
+    private var waitingForResponseRow: some View {
+        HStack(alignment: .bottom, spacing: 10) {
+            speakerBadge(systemName: "sparkles", tint: .orange)
+
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Codex is thinking...")
+                    .font(bodyFont)
+            }
+            .padding(.horizontal, scaled(12))
+            .padding(.vertical, scaled(10))
+            .background(
+                LinearGradient(
+                    colors: [
+                        Color(uiColor: .secondarySystemBackground),
+                        Color(uiColor: .tertiarySystemBackground)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                in: bubbleShape(isAssistant: true)
+            )
+
+            Spacer(minLength: 50)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func messageBubble(_ message: RelayMessage, isAssistant: Bool, isPending: Bool) -> some View {
         VStack(alignment: .leading, spacing: scaled(8)) {
             ForEach(messageSegments(for: message.content)) { segment in
                 switch segment.kind {
@@ -437,7 +485,14 @@ struct ContentView: View {
             HStack(spacing: 6) {
                 Text(isAssistant ? "Codex" : "You")
                 Spacer(minLength: 8)
-                Text(Self.timeFormatter.string(from: message.timestamp))
+                if isPending {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .tint(Color.white.opacity(0.95))
+                    Text("Sending...")
+                } else {
+                    Text(Self.timeFormatter.string(from: message.timestamp))
+                }
             }
             .font(metaFont)
             .foregroundStyle(isAssistant ? .secondary : Color.white.opacity(0.85))
@@ -510,41 +565,186 @@ struct ContentView: View {
     }
 
     private var composer: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            TextField("Message Codex...", text: $viewModel.inputText, axis: .vertical)
-                .font(bodyFont)
-                .focused($focusedField, equals: .message)
-                .lineLimit(1...6)
-                .textFieldStyle(.plain)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(Color(uiColor: .systemBackground))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(Color(uiColor: .separator), lineWidth: 0.5)
-                )
+        VStack(alignment: .leading, spacing: 8) {
+            if viewModel.canPickDirectoryForNewSession {
+                newSessionDirectoryPicker
+            } else if let workingDirectory = viewModel.displayWorkingDirectory {
+                workingDirectoryReadOnly(workingDirectory)
+            }
 
-            Button {
-                Task { await viewModel.sendMessage() }
-            } label: {
-                if viewModel.isSending {
-                    ProgressView()
-                        .frame(width: 44, height: 44)
+            HStack(alignment: .bottom, spacing: 10) {
+                TextField("Message Codex...", text: $viewModel.inputText, axis: .vertical)
+                    .font(bodyFont)
+                    .focused($focusedField, equals: .message)
+                    .lineLimit(1...6)
+                    .textFieldStyle(.plain)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color(uiColor: .systemBackground))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(Color(uiColor: .separator), lineWidth: 0.5)
+                    )
+
+                Button {
+                    Task { await viewModel.sendMessage() }
+                } label: {
+                    if viewModel.isSending {
+                        ProgressView()
+                            .frame(width: 44, height: 44)
+                    } else {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: scaled(26)))
+                            .foregroundStyle(
+                                viewModel.inputText.trimmedForSend.isEmpty ? Color.secondary : Color.blue
+                            )
+                            .frame(width: 44, height: 44)
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.isSending || viewModel.isLoading || viewModel.inputText.trimmedForSend.isEmpty)
+                .accessibilityLabel("Send Message")
+            }
+        }
+    }
+
+    private var newSessionDirectoryPicker: some View {
+        HStack(spacing: 8) {
+            Label(
+                viewModel.newSessionWorkingDirectory.trimmedForSend.isEmpty
+                    ? "No directory selected"
+                    : viewModel.newSessionWorkingDirectory,
+                systemImage: "folder"
+            )
+            .font(.caption)
+            .lineLimit(1)
+            .foregroundStyle(.secondary)
+
+            Spacer()
+
+            if viewModel.newSessionWorkingDirectory.trimmedForSend.isEmpty == false {
+                Button("Clear") {
+                    viewModel.updateNewSessionWorkingDirectory("")
+                }
+                .font(.caption)
+            }
+
+            Button("Browse") {
+                dismissKeyboard()
+                isDirectoryPickerPresented = true
+            }
+            .font(.caption.weight(.semibold))
+        }
+    }
+
+    private func workingDirectoryReadOnly(_ path: String) -> some View {
+        Label(path, systemImage: "folder")
+            .font(.caption)
+            .lineLimit(1)
+            .foregroundStyle(.secondary)
+    }
+
+    private var directoryPickerSheet: some View {
+        NavigationStack {
+            Group {
+                if pickerIsLoading {
+                    ProgressView("Loading folders…")
+                } else if let pickerError {
+                    VStack(spacing: 10) {
+                        Text("Unable to browse folders")
+                            .font(.headline)
+                        Text(pickerError)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                        Button("Retry") {
+                            Task { await loadDirectoryListing(path: pickerListing?.path) }
+                        }
+                    }
+                    .padding()
+                } else if let listing = pickerListing {
+                    List {
+                        if viewModel.recentWorkingDirectories.isEmpty == false {
+                            Section("Recent") {
+                                ForEach(viewModel.recentWorkingDirectories, id: \.self) { item in
+                                    Button {
+                                        Task { await loadDirectoryListing(path: item) }
+                                    } label: {
+                                        Label(item, systemImage: "clock.arrow.circlepath")
+                                            .lineLimit(1)
+                                    }
+                                }
+                            }
+                        }
+
+                        Section("Current") {
+                            Button {
+                                viewModel.updateNewSessionWorkingDirectory(listing.path)
+                                isDirectoryPickerPresented = false
+                            } label: {
+                                Label("Use This Folder", systemImage: "checkmark.circle.fill")
+                            }
+                        }
+
+                        if let parentPath = listing.parentPath {
+                            Section("Navigate") {
+                                Button {
+                                    Task { await loadDirectoryListing(path: parentPath) }
+                                } label: {
+                                    Label("..", systemImage: "arrow.up.left")
+                                }
+                            }
+                        }
+
+                        Section("Folders") {
+                            if listing.entries.isEmpty {
+                                Text("No subfolders")
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                ForEach(listing.entries) { entry in
+                                    Button {
+                                        Task { await loadDirectoryListing(path: entry.path) }
+                                    } label: {
+                                        Label(entry.name, systemImage: "folder")
+                                    }
+                                }
+                            }
+                        }
+                    }
                 } else {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: scaled(26)))
-                        .foregroundStyle(
-                            viewModel.inputText.trimmedForSend.isEmpty ? Color.secondary : Color.blue
-                        )
-                        .frame(width: 44, height: 44)
+                    ProgressView("Loading folders…")
                 }
             }
-            .buttonStyle(.plain)
-            .disabled(viewModel.isSending || viewModel.isLoading || viewModel.inputText.trimmedForSend.isEmpty)
-            .accessibilityLabel("Send Message")
+            .navigationTitle("Choose Folder")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") {
+                        isDirectoryPickerPresented = false
+                    }
+                }
+            }
+        }
+        .task(id: isDirectoryPickerPresented) {
+            guard isDirectoryPickerPresented else { return }
+            let preferred = viewModel.newSessionWorkingDirectory.trimmedForSend
+            await loadDirectoryListing(path: preferred.isEmpty ? nil : preferred)
+        }
+    }
+
+    @MainActor
+    private func loadDirectoryListing(path: String?) async {
+        pickerIsLoading = true
+        pickerError = nil
+        defer { pickerIsLoading = false }
+
+        do {
+            pickerListing = try await viewModel.listDirectories(path: path)
+        } catch {
+            pickerError = error.localizedDescription
         }
     }
 
@@ -613,8 +813,23 @@ struct ContentView: View {
                 .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 2)
-        .listRowBackground(isSelected ? Color.blue.opacity(0.14) : Color.clear)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(isSelected ? Color.accentColor.opacity(0.14) : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(isSelected ? Color.accentColor.opacity(0.22) : Color.clear, lineWidth: 1)
+        )
+        .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+    }
+
+    private var sidebarBackground: some View {
+        Color(uiColor: .systemGroupedBackground)
     }
 
     private var filteredThreads: [RelayThreadSummary] {
@@ -655,6 +870,12 @@ struct ContentView: View {
         let current = viewModel.messages[index].timestamp
         let previous = viewModel.messages[index - 1].timestamp
         return Calendar.current.isDate(current, inSameDayAs: previous) == false
+    }
+
+    private func isPendingMessage(at index: Int, message: RelayMessage) -> Bool {
+        guard viewModel.isSending else { return false }
+        guard message.role == .user else { return false }
+        return index == viewModel.messages.indices.last
     }
 
     private func messageID(for index: Int) -> String {

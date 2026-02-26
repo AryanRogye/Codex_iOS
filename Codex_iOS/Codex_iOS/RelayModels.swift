@@ -75,6 +75,32 @@ struct RelayErrorResponse: Decodable {
     let error: String
 }
 
+struct RelayDirectoryListing: Decodable {
+    let path: String
+    let parentPath: String?
+    let entries: [RelayDirectoryEntry]
+
+    enum CodingKeys: String, CodingKey {
+        case path
+        case parentPath = "parent_path"
+        case entries
+    }
+}
+
+struct RelayDirectoryEntry: Decodable, Equatable, Identifiable {
+    let name: String
+    let path: String
+    let isDirectory: Bool
+
+    var id: String { path }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case path
+        case isDirectory = "is_directory"
+    }
+}
+
 enum RelayCoders {
     static func makeDecoder() -> JSONDecoder {
         let decoder = JSONDecoder()
