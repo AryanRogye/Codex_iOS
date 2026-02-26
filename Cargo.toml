@@ -1,0 +1,17 @@
+[package]
+name = "codex-ios-relay"
+version = "0.1.0"
+edition = "2024"
+description = "Local Rust relay that lets an iOS app continue chats through Codex running on macOS."
+license = "MIT"
+
+[dependencies]
+axum = "0.8.6"
+chrono = { version = "0.4.42", features = ["serde"] }
+clap = { version = "4.5.48", features = ["derive", "env"] }
+dirs = "6.0.0"
+reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tokio = { version = "1.47.1", features = ["full"] }
+uuid = { version = "1.18.1", features = ["v4"] }

@@ -1,0 +1,41 @@
+# Rust build artifacts
+/target/
+
+# Xcode and Swift build output
+DerivedData/
+build/
+*.xcresult
+*.ipa
+*.dSYM
+*.dSYM.zip
+
+# User-specific Xcode state
+*.xcuserstate
+*.xccheckout
+*.moved-aside
+*.xcscmblueprint
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+xcuserdata/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# IDE/editor settings
+.vscode/
+.idea/
+
+# macOS metadata
+.DS_Store
+
+# Logs and local runtime files
+*.log
+relay-data/
+threads.json
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+*.local
