@@ -11,12 +11,13 @@ struct RelayOptionsView: View {
         case relayURL
         case relayToken
         case model
+        case workingDirectory
     }
 
     var body: some View {
         Form {
             Section("Connection") {
-                TextField("Relay URL (ex: http://192.168.1.20:8787)", text: $viewModel.relayURLText)
+                TextField("Relay URL (ex: https://192.168.1.20:8787)", text: $viewModel.relayURLText)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled(true)
                     .submitLabel(.done)

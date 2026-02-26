@@ -49,11 +49,13 @@ struct RelayChatRequest: Encodable {
     let threadId: String?
     let message: String
     let model: String?
+    let workingDirectory: String?
 
     enum CodingKeys: String, CodingKey {
         case threadId = "thread_id"
         case message
         case model
+        case workingDirectory = "working_directory"
     }
 }
 

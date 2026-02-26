@@ -344,6 +344,10 @@ struct ContentView: View {
             }
             .background(transcriptBackground)
             .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .stroke(Color(uiColor: .separator).opacity(0.2), lineWidth: 0.5)
+            )
             .overlay(alignment: .center) {
                 if viewModel.isLoading {
                     ProgressView()
@@ -364,26 +368,7 @@ struct ContentView: View {
     }
 
     private var transcriptBackground: some View {
-        ZStack {
-            LinearGradient(
-                colors: [
-                    Color(uiColor: .systemBackground),
-                    Color(uiColor: .secondarySystemBackground)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-
-            Circle()
-                .fill(Color.blue.opacity(0.08))
-                .frame(width: 220)
-                .offset(x: 130, y: -170)
-
-            Circle()
-                .fill(Color.orange.opacity(0.08))
-                .frame(width: 180)
-                .offset(x: -140, y: 190)
-        }
+        Color(uiColor: .systemBackground)
     }
 
     private func messageRow(_ message: RelayMessage) -> some View {
@@ -443,7 +428,7 @@ struct ContentView: View {
             }
 
             if isAssistant {
-                let options = inlineOptions(from: message.content)
+                let options = QuickChoiceParser.options(from: message.content)
                 if options.isEmpty == false {
                     optionChips(options)
                 }
@@ -502,17 +487,17 @@ struct ContentView: View {
         }
     }
 
-    private func optionChips(_ options: [String]) -> some View {
+    private func optionChips(_ options: [QuickChoiceOption]) -> some View {
         LazyVGrid(
             columns: [GridItem(.adaptive(minimum: 78), spacing: 8, alignment: .leading)],
             alignment: .leading,
             spacing: 8
         ) {
-            ForEach(options, id: \.self) { option in
+            ForEach(options, id: \.label) { option in
                 Button {
-                    insertQuickChoice(option)
+                    insertQuickChoice(option.insertionText)
                 } label: {
-                    Text(option)
+                    Text(option.label)
                         .font(.system(size: scaled(13), weight: .semibold, design: .rounded))
                         .lineLimit(1)
                         .padding(.horizontal, 12)
@@ -558,7 +543,7 @@ struct ContentView: View {
                 }
             }
             .buttonStyle(.plain)
-            .disabled(viewModel.isSending || viewModel.inputText.trimmedForSend.isEmpty)
+            .disabled(viewModel.isSending || viewModel.isLoading || viewModel.inputText.trimmedForSend.isEmpty)
             .accessibilityLabel("Send Message")
         }
     }
@@ -923,61 +908,6 @@ struct ContentView: View {
             return false
         }
         return compact.allSatisfy { $0 == marker }
-    }
-
-    private func inlineOptions(from content: String) -> [String] {
-        let lines = content.components(separatedBy: .newlines)
-        var options: [String] = []
-
-        for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard trimmed.hasPrefix("-") || trimmed.hasPrefix("*") else { continue }
-
-            var candidate = String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
-            if candidate.hasPrefix("["),
-               let closeBracket = candidate.firstIndex(of: "]") {
-                let after = candidate.index(after: closeBracket)
-                candidate = String(candidate[after...]).trimmingCharacters(in: .whitespaces)
-            }
-
-            candidate = candidate
-                .replacingOccurrences(of: #"[`*_]"#, with: "", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-
-            guard candidate.isEmpty == false else { continue }
-            guard candidate.count <= 40 else { continue }
-
-            options.append(candidate)
-        }
-
-        let deduplicated = uniqueOptions(options)
-        if deduplicated.count >= 2 && deduplicated.count <= 4 {
-            return deduplicated
-        }
-
-        let lower = content.lowercased()
-        if lower.contains("yes/no") || lower.contains("yes or no") || lower.contains("respond with yes or no") {
-            return ["Yes", "No"]
-        }
-        if lower.contains("approve or reject") || lower.contains("approve/reject") {
-            return ["Approve", "Reject"]
-        }
-
-        return []
-    }
-
-    private func uniqueOptions(_ input: [String]) -> [String] {
-        var seen = Set<String>()
-        var output: [String] = []
-
-        for item in input {
-            let normalized = item.lowercased()
-            guard seen.contains(normalized) == false else { continue }
-            seen.insert(normalized)
-            output.append(item)
-        }
-
-        return output
     }
 
     private func messageSegments(for content: String) -> [MessageSegment] {

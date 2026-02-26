@@ -21,6 +21,20 @@
                ReferencedContainer = "container:Codex_iOS.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "A11EFA062F60000183C5BE01"
+               BuildableName = "Codex_iOSTests.xctest"
+               BlueprintName = "Codex_iOSTests"
+               ReferencedContainer = "container:Codex_iOS.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -29,6 +43,28 @@
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
       shouldUseLaunchSchemeArgsEnv = "YES"
       shouldAutocreateTestPlan = "YES">
+      <Testables>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "A11EFA062F60000183C5BE01"
+               BuildableName = "Codex_iOSTests.xctest"
+               BlueprintName = "Codex_iOSTests"
+               ReferencedContainer = "container:Codex_iOS.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+      </Testables>
+      <MacroExpansion>
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "9BD8FA932F50131F0083C5BE"
+            BuildableName = "Codex_iOS.app"
+            BlueprintName = "Codex_iOS"
+            ReferencedContainer = "container:Codex_iOS.xcodeproj">
+         </BuildableReference>
+      </MacroExpansion>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"

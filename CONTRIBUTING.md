@@ -29,6 +29,7 @@ xcodebuild \
 2. Include reproduction steps for bug fixes.
 3. Update `README.md` when behavior or flags change.
 4. Do not commit secrets or personal local data.
+5. Any new or changed networking functionality must include automated tests (unit/integration) that cover success and failure paths.
 
 ## Security and privacy
 

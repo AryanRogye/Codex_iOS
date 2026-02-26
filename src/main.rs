@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
     io::{BufRead, BufReader},
     net::SocketAddr,
@@ -66,6 +66,12 @@ struct ServeArgs {
     auth_token: Option<String>,
     #[arg(long, env = "RELAY_DATA_PATH")]
     data_path: Option<PathBuf>,
+    #[arg(long, env = "RELAY_TLS_CERT")]
+    tls_cert: Option<PathBuf>,
+    #[arg(long, env = "RELAY_TLS_KEY")]
+    tls_key: Option<PathBuf>,
+    #[arg(long = "tls-san")]
+    tls_subject_alt_name: Vec<String>,
     #[arg(long, env = "RELAY_CODEX_BIN", default_value = "codex")]
     codex_bin: String,
 }
@@ -150,6 +156,7 @@ struct ChatRequest {
     thread_id: Option<String>,
     message: String,
     model: Option<String>,
+    working_directory: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -241,6 +248,9 @@ async fn main() {
         default_model: std::env::var("RELAY_DEFAULT_MODEL").ok(),
         auth_token: std::env::var("RELAY_AUTH_TOKEN").ok(),
         data_path: std::env::var("RELAY_DATA_PATH").ok().map(PathBuf::from),
+        tls_cert: std::env::var("RELAY_TLS_CERT").ok().map(PathBuf::from),
+        tls_key: std::env::var("RELAY_TLS_KEY").ok().map(PathBuf::from),
+        tls_subject_alt_name: Vec::new(),
         codex_bin: std::env::var("RELAY_CODEX_BIN").unwrap_or_else(|_| "codex".to_string()),
     })) {
         Command::NewToken => {
@@ -256,13 +266,45 @@ async fn main() {
 }
 
 async fn run_server(args: ServeArgs) -> Result<(), String> {
-    let openai_api_key = args.openai_api_key.filter(|value| !value.trim().is_empty());
-    let default_model = args
-        .default_model
+    let ServeArgs {
+        bind,
+        provider,
+        openai_api_key,
+        default_model,
+        auth_token,
+        data_path,
+        tls_cert,
+        tls_key,
+        tls_subject_alt_name,
+        codex_bin,
+    } = args;
+
+    let openai_api_key = openai_api_key.filter(|value| !value.trim().is_empty());
+    let default_model = default_model
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    let bind_addr: SocketAddr = bind
+        .parse()
+        .map_err(|err| format!("invalid --bind '{}': {err}", bind))?;
+    let tls_paths = match (tls_cert, tls_key) {
+        (Some(cert_path), Some(key_path)) => Some((cert_path, key_path)),
+        (Some(_), None) => {
+            return Err(
+                "RELAY_TLS_KEY (or --tls-key) is required when RELAY_TLS_CERT is set".to_string(),
+            );
+        }
+        (None, Some(_)) => {
+            return Err(
+                "RELAY_TLS_CERT (or --tls-cert) is required when RELAY_TLS_KEY is set".to_string(),
+            );
+        }
+        (None, None) => Some(generate_self_signed_tls_material(
+            bind_addr,
+            &tls_subject_alt_name,
+        )?),
+    };
 
-    match args.provider {
+    match provider {
         RelayProvider::Openai => {
             if openai_api_key.is_none() {
                 return Err(
@@ -272,29 +314,24 @@ async fn run_server(args: ServeArgs) -> Result<(), String> {
             }
         }
         RelayProvider::Codex => {
-            ensure_codex_ready(&args.codex_bin).await?;
+            ensure_codex_ready(&codex_bin).await?;
         }
     }
 
-    let bind_addr: SocketAddr = args
-        .bind
-        .parse()
-        .map_err(|err| format!("invalid --bind '{}': {err}", args.bind))?;
-
-    let data_path = args.data_path.unwrap_or_else(default_data_path);
+    let data_path = data_path.unwrap_or_else(default_data_path);
     let store = load_store(&data_path)?;
 
-    if args.auth_token.is_none() {
+    if auth_token.is_none() {
         eprintln!("warning: running without auth token; set RELAY_AUTH_TOKEN in non-local setups");
     }
 
     let state = AppState {
         client: Client::new(),
-        provider: args.provider,
+        provider,
         openai_api_key,
-        codex_bin: args.codex_bin,
+        codex_bin,
         default_model,
-        auth_token: args.auth_token,
+        auth_token,
         data_path,
         store: Arc::new(RwLock::new(store)),
     };
@@ -306,22 +343,99 @@ async fn run_server(args: ServeArgs) -> Result<(), String> {
         .route("/v1/chat", post(chat))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(bind_addr)
+    let provider_name = match provider {
+        RelayProvider::Codex => "codex",
+        RelayProvider::Openai => "openai",
+    };
+
+    let (cert_path, key_path) = tls_paths.expect("tls cert/key must be configured");
+    install_rustls_crypto_provider();
+    let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
         .await
-        .map_err(|err| format!("failed to bind {bind_addr}: {err}"))?;
+        .map_err(|err| {
+            format!(
+                "failed to load TLS cert/key (cert='{}', key='{}'): {err}",
+                cert_path.display(),
+                key_path.display()
+            )
+        })?;
+
+    println!("relay listening on https://{bind_addr} (provider={provider_name})");
+    axum_server::bind_rustls(bind_addr, tls_config)
+        .serve(app.into_make_service())
+        .await
+        .map_err(|err| format!("https server failed: {err}"))?;
+    Ok(())
+}
+
+fn install_rustls_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+fn generate_self_signed_tls_material(
+    bind_addr: SocketAddr,
+    extra_subject_alt_names: &[String],
+) -> Result<(PathBuf, PathBuf), String> {
+    let tls_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".codex-ios-relay")
+        .join("tls");
+    std::fs::create_dir_all(&tls_dir)
+        .map_err(|err| format!("failed creating TLS directory {tls_dir:?}: {err}"))?;
+
+    let cert_path = tls_dir.join("selfsigned-cert.pem");
+    let key_path = tls_dir.join("selfsigned-key.pem");
+
+    let mut sans = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
+    let bind_ip = bind_addr.ip();
+    if !bind_ip.is_unspecified() {
+        sans.push(bind_ip.to_string());
+    } else {
+        if let Ok(primary_lan_ip) = local_ip_address::local_ip() {
+            sans.push(primary_lan_ip.to_string());
+        }
+        if extra_subject_alt_names.is_empty() {
+            eprintln!(
+                "warning: if your iPhone cannot validate hostname/IP, run with --tls-san <your-mac-lan-ip>.",
+            );
+        }
+    }
+    sans.extend(extra_subject_alt_names.iter().cloned());
+
+    let mut seen = HashSet::new();
+    let mut unique_sans = Vec::new();
+    for value in sans {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let normalized = trimmed.to_ascii_lowercase();
+        if seen.insert(normalized) {
+            unique_sans.push(trimmed.to_string());
+        }
+    }
+
+    let certified = rcgen::generate_simple_self_signed(unique_sans)
+        .map_err(|err| format!("failed creating self-signed TLS cert: {err}"))?;
+    let cert_pem = certified.cert.pem();
+    let key_pem = certified.key_pair.serialize_pem();
+
+    std::fs::write(&cert_path, cert_pem)
+        .map_err(|err| format!("failed writing TLS cert to {:?}: {err}", cert_path))?;
+    std::fs::write(&key_path, key_pem)
+        .map_err(|err| format!("failed writing TLS key to {:?}: {err}", key_path))?;
 
     println!(
-        "relay listening on http://{bind_addr} (provider={})",
-        match args.provider {
-            RelayProvider::Codex => "codex",
-            RelayProvider::Openai => "openai",
-        }
+        "generated self-signed TLS certificate: cert='{}' key='{}'",
+        cert_path.display(),
+        key_path.display()
     );
 
-    axum::serve(listener, app)
-        .await
-        .map_err(|err| format!("server failed: {err}"))?;
-    Ok(())
+    Ok((cert_path, key_path))
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -425,20 +539,28 @@ async fn chat(
 ) -> Result<Json<ChatResponse>, ApiError> {
     authorize(&headers, state.auth_token.as_deref())?;
 
-    let user_message = payload.message.trim().to_string();
+    let ChatRequest {
+        thread_id,
+        message,
+        model,
+        working_directory,
+    } = payload;
+
+    let user_message = message.trim().to_string();
     if user_message.is_empty() {
         return Err(ApiError::BadRequest("message cannot be empty".to_string()));
     }
 
-    let requested_thread_id = payload
-        .thread_id
+    let requested_thread_id = thread_id
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let requested_model = payload
-        .model
+    let requested_model = model
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .or_else(|| state.default_model.clone());
+    let requested_working_directory = working_directory
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
 
     let provider_result = match state.provider {
         RelayProvider::Openai => {
@@ -451,11 +573,14 @@ async fn chat(
             .await?
         }
         RelayProvider::Codex => {
+            let resolved_working_directory =
+                resolve_working_directory(requested_working_directory.as_deref())?;
             handle_codex_chat(
                 &state,
                 requested_thread_id.as_deref(),
                 &user_message,
                 requested_model.as_deref(),
+                resolved_working_directory.as_deref(),
             )
             .await?
         }
@@ -544,12 +669,14 @@ async fn handle_codex_chat(
     requested_thread_id: Option<&str>,
     user_message: &str,
     requested_model: Option<&str>,
+    requested_working_directory: Option<&Path>,
 ) -> Result<ProviderChatResult, ApiError> {
     let output = run_codex_exec(
         &state.codex_bin,
         requested_thread_id,
         user_message,
         requested_model,
+        requested_working_directory,
     )
     .await?;
 
@@ -576,12 +703,7 @@ async fn handle_codex_chat(
         )));
     }
 
-    let thread_id = parsed
-        .thread_id
-        .or_else(|| requested_thread_id.map(|value| value.to_string()))
-        .ok_or_else(|| {
-            ApiError::Upstream("codex exec succeeded but no thread_id was returned".to_string())
-        })?;
+    let thread_id = resolve_thread_id(requested_thread_id, parsed.thread_id)?;
 
     let reply = parsed.reply.ok_or_else(|| {
         ApiError::Upstream(
@@ -595,6 +717,22 @@ async fn handle_codex_chat(
         model: requested_model
             .map(str::to_string)
             .unwrap_or_else(|| RelayProvider::Codex.label().to_string()),
+    })
+}
+
+fn resolve_thread_id(
+    requested_thread_id: Option<&str>,
+    parsed_thread_id: Option<String>,
+) -> Result<String, ApiError> {
+    if let Some(thread_id) = requested_thread_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(thread_id.to_string());
+    }
+
+    parsed_thread_id.ok_or_else(|| {
+        ApiError::Upstream("codex exec succeeded but no thread_id was returned".to_string())
     })
 }
 
@@ -674,6 +812,7 @@ async fn run_codex_exec(
     requested_thread_id: Option<&str>,
     user_message: &str,
     requested_model: Option<&str>,
+    requested_working_directory: Option<&Path>,
 ) -> Result<std::process::Output, ApiError> {
     let mut command = TokioCommand::new(codex_bin);
     command.arg("exec");
@@ -696,6 +835,10 @@ async fn run_codex_exec(
         command.arg(thread_id.trim());
     }
 
+    if let Some(working_directory) = requested_working_directory {
+        command.current_dir(working_directory);
+    }
+
     command.arg(user_message);
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
@@ -705,6 +848,83 @@ async fn run_codex_exec(
         .output()
         .await
         .map_err(|err| ApiError::Upstream(format!("failed to spawn codex command: {err}")))
+}
+
+fn resolve_working_directory(
+    requested_working_directory: Option<&str>,
+) -> Result<Option<PathBuf>, ApiError> {
+    let base_dir = std::env::current_dir()
+        .map_err(|err| ApiError::Internal(format!("failed to read current directory: {err}")))?;
+    resolve_working_directory_with_base(requested_working_directory, &base_dir)
+}
+
+fn resolve_working_directory_with_base(
+    requested_working_directory: Option<&str>,
+    base_dir: &Path,
+) -> Result<Option<PathBuf>, ApiError> {
+    let Some(raw) = requested_working_directory
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let expanded = expand_working_directory(raw)?;
+    let candidate = if expanded.is_absolute() {
+        expanded
+    } else {
+        base_dir.join(expanded)
+    };
+
+    let metadata = std::fs::metadata(&candidate).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            ApiError::BadRequest(format!(
+                "working_directory does not exist: {}",
+                candidate.display()
+            ))
+        } else {
+            ApiError::BadRequest(format!(
+                "cannot access working_directory '{}': {err}",
+                candidate.display()
+            ))
+        }
+    })?;
+
+    if metadata.is_dir() == false {
+        return Err(ApiError::BadRequest(format!(
+            "working_directory is not a directory: {}",
+            candidate.display()
+        )));
+    }
+
+    let canonical = candidate.canonicalize().map_err(|err| {
+        ApiError::BadRequest(format!(
+            "cannot resolve working_directory '{}': {err}",
+            candidate.display()
+        ))
+    })?;
+
+    Ok(Some(canonical))
+}
+
+fn expand_working_directory(raw: &str) -> Result<PathBuf, ApiError> {
+    if raw == "~" || raw.starts_with("~/") {
+        let home = dirs::home_dir().ok_or_else(|| {
+            ApiError::BadRequest("cannot resolve '~' without a home directory".to_string())
+        })?;
+        if raw == "~" {
+            return Ok(home);
+        }
+        return Ok(home.join(raw.trim_start_matches("~/")));
+    }
+
+    if raw.starts_with('~') {
+        return Err(ApiError::BadRequest(
+            "working_directory must use '~' or '~/path' when using home shortcuts".to_string(),
+        ));
+    }
+
+    Ok(PathBuf::from(raw))
 }
 
 async fn ensure_codex_ready(codex_bin: &str) -> Result<(), String> {
@@ -1134,4 +1354,144 @@ fn persist_store(path: &Path, store: &Store) -> Result<(), String> {
     let data = serde_json::to_string_pretty(store)
         .map_err(|err| format!("failed to serialize store: {err}"))?;
     std::fs::write(path, data).map_err(|err| format!("failed to write store to {path:?}: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn resolve_thread_id_prefers_requested_id_for_continuations() {
+        let resolved = resolve_thread_id(
+            Some("old-thread-id"),
+            Some("new-thread-id-from-cli".to_string()),
+        )
+        .expect("thread id should resolve");
+        assert_eq!(resolved, "old-thread-id");
+    }
+
+    #[test]
+    fn resolve_thread_id_falls_back_to_parsed_id_when_unset() {
+        let resolved = resolve_thread_id(None, Some("parsed-thread".to_string()))
+            .expect("thread id should resolve");
+        assert_eq!(resolved, "parsed-thread");
+    }
+
+    #[test]
+    fn resolve_thread_id_errors_when_no_id_exists() {
+        let error = resolve_thread_id(None, None).expect_err("resolution should fail");
+        match error {
+            ApiError::Upstream(message) => {
+                assert!(message.contains("no thread_id was returned"));
+            }
+            _ => panic!("unexpected error variant"),
+        }
+    }
+
+    #[test]
+    fn parse_codex_jsonl_extracts_thread_reply_and_error() {
+        let stdout = r#"
+not-json
+{"type":"thread.started","thread_id":"thread-123"}
+{"type":"item.completed","item":{"type":"agent_message","text":"hello from assistant"}}
+{"type":"error","message":"retry me"}
+"#;
+
+        let parsed = parse_codex_jsonl(stdout);
+        assert_eq!(parsed.thread_id.as_deref(), Some("thread-123"));
+        assert_eq!(parsed.reply.as_deref(), Some("hello from assistant"));
+        assert_eq!(parsed.last_error.as_deref(), Some("retry me"));
+    }
+
+    #[test]
+    fn resolve_working_directory_returns_none_when_unset() {
+        let temp_root =
+            std::env::temp_dir().join(format!("codex-ios-relay-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_root).expect("temp root should exist");
+        let result = resolve_working_directory_with_base(None, &temp_root)
+            .expect("unset working directory should be valid");
+        assert_eq!(result, None);
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn resolve_working_directory_resolves_relative_paths() {
+        let temp_root =
+            std::env::temp_dir().join(format!("codex-ios-relay-test-{}", Uuid::new_v4()));
+        let project_dir = temp_root.join("project");
+        fs::create_dir_all(&project_dir).expect("project dir should exist");
+
+        let resolved = resolve_working_directory_with_base(Some("project"), &temp_root)
+            .expect("relative path should resolve")
+            .expect("resolved path should exist");
+
+        assert_eq!(
+            resolved,
+            project_dir
+                .canonicalize()
+                .expect("canonical project path should resolve")
+        );
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn resolve_working_directory_expands_home_shortcut() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+
+        let resolved = resolve_working_directory_with_base(Some("~"), Path::new("/"))
+            .expect("home shortcut should resolve")
+            .expect("home path should be present");
+
+        assert_eq!(
+            resolved,
+            home.canonicalize()
+                .expect("canonical home path should resolve")
+        );
+    }
+
+    #[test]
+    fn resolve_working_directory_rejects_missing_paths() {
+        let temp_root =
+            std::env::temp_dir().join(format!("codex-ios-relay-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_root).expect("temp root should exist");
+
+        let error = resolve_working_directory_with_base(Some("missing-folder"), &temp_root)
+            .expect_err("missing folder should fail");
+
+        match error {
+            ApiError::BadRequest(message) => {
+                assert!(message.contains("does not exist"));
+            }
+            _ => panic!("unexpected error variant"),
+        }
+
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn resolve_working_directory_rejects_files() {
+        let temp_root =
+            std::env::temp_dir().join(format!("codex-ios-relay-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_root).expect("temp root should exist");
+        let file_path = temp_root.join("not-a-dir.txt");
+        fs::write(&file_path, "hello").expect("temp file should be written");
+
+        let error = resolve_working_directory_with_base(
+            Some(file_path.to_string_lossy().as_ref()),
+            &temp_root,
+        )
+        .expect_err("file path should fail");
+
+        match error {
+            ApiError::BadRequest(message) => {
+                assert!(message.contains("not a directory"));
+            }
+            _ => panic!("unexpected error variant"),
+        }
+
+        let _ = fs::remove_dir_all(temp_root);
+    }
 }

@@ -1,5 +1,12 @@
 import Foundation
 
+protocol RelayClientProtocol {
+    func health(baseURL: URL, token: String?) async throws -> RelayHealthResponse
+    func listThreads(baseURL: URL, token: String?) async throws -> [RelayThreadSummary]
+    func getThread(baseURL: URL, token: String?, threadID: String) async throws -> RelayThreadResponse
+    func chat(baseURL: URL, token: String?, payload: RelayChatRequest) async throws -> RelayChatResponse
+}
+
 struct RelayClient {
     private let session: URLSession
 
@@ -75,6 +82,8 @@ struct RelayClient {
         }
     }
 }
+
+extension RelayClient: RelayClientProtocol {}
 
 enum RelayClientError: LocalizedError {
     case invalidURL
