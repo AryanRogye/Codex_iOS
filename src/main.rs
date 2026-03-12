@@ -628,17 +628,27 @@ async fn chat(
         }
     };
 
+    let seeded_thread = requested_thread_id
+        .as_deref()
+        .and_then(|thread_id| seed_thread_from_codex_session(state.provider, thread_id));
+
     {
         let mut store = state.store.write().await;
         let now = Utc::now();
         let thread = store
             .threads
             .entry(provider_result.thread_id.clone())
-            .or_insert_with(|| ThreadRecord {
-                id: provider_result.thread_id.clone(),
-                created_at: now,
-                updated_at: now,
-                messages: Vec::new(),
+            .or_insert_with(|| {
+                if let Some(seed) = seeded_thread.clone() {
+                    seed
+                } else {
+                    ThreadRecord {
+                        id: provider_result.thread_id.clone(),
+                        created_at: now,
+                        updated_at: now,
+                        messages: Vec::new(),
+                    }
+                }
             });
 
         thread.messages.push(StoredMessage {
@@ -661,6 +671,20 @@ async fn chat(
         model: provider_result.model,
         reply: provider_result.reply,
     }))
+}
+
+fn seed_thread_from_codex_session(provider: RelayProvider, thread_id: &str) -> Option<ThreadRecord> {
+    if !matches!(provider, RelayProvider::Codex) {
+        return None;
+    }
+
+    let thread = load_codex_session_thread(thread_id).ok().flatten()?;
+    Some(ThreadRecord {
+        id: thread.id,
+        created_at: thread.created_at,
+        updated_at: thread.updated_at,
+        messages: thread.messages,
+    })
 }
 
 async fn handle_openai_chat(

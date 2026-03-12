@@ -43,6 +43,15 @@
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
       shouldUseLaunchSchemeArgsEnv = "YES"
       shouldAutocreateTestPlan = "YES">
+      <MacroExpansion>
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "9BD8FA932F50131F0083C5BE"
+            BuildableName = "Codex_iOS.app"
+            BlueprintName = "Codex_iOS"
+            ReferencedContainer = "container:Codex_iOS.xcodeproj">
+         </BuildableReference>
+      </MacroExpansion>
       <Testables>
          <TestableReference
             skipped = "NO"
@@ -56,15 +65,6 @@
             </BuildableReference>
          </TestableReference>
       </Testables>
-      <MacroExpansion>
-         <BuildableReference
-            BuildableIdentifier = "primary"
-            BlueprintIdentifier = "9BD8FA932F50131F0083C5BE"
-            BuildableName = "Codex_iOS.app"
-            BlueprintName = "Codex_iOS"
-            ReferencedContainer = "container:Codex_iOS.xcodeproj">
-         </BuildableReference>
-      </MacroExpansion>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"
